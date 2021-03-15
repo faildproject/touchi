@@ -1,206 +1,296 @@
 /*
-  Display "flicker free" scrolling text and updating number
+  The TFT_eSPI library incorporates an Adafruit_GFX compatible
+  button handling class, this sketch is based on the Arduin-o-phone
+  example.
 
-  Example for library:
-  https://github.com/Bodmer/TFT_eSPI
+  This example diplays a keypad where numbers can be entered and
+  send to the Serial Monitor window.
 
-  The sketch has been tested on a 320x240 ILI9341 based TFT, it
-  coule be adapted for other screen sizes.
+  The sketch has been tested on the ESP8266 (which supports SPIFFS)
 
-  A Sprite is notionally an invisible graphics screen that is
-  kept in the processors RAM. Graphics can be drawn into the
-  Sprite just as it can be drawn directly to the screen. Once
-  the Sprite is completed it can be plotted onto the screen in
-  any position. If there is sufficient RAM then the Sprite can
-  be the same size as the screen and used as a frame buffer.
-
-  The Sprite occupies (2 * width * height) bytes.
-
-  On a ESP8266 Sprite sizes up to 128 x 160 can be accomodated,
-  this size requires 128*160*2 bytes (40kBytes) of RAM, this must be
-  available or the processor will crash. You need to make the sprite
-  small enough to fit, with RAM spare for any "local variables" that
-  may be needed by your sketch and libraries.
-
-  Created by Bodmer 15/11/17
-
-  #########################################################################
-  ###### DON'T FORGET TO UPDATE THE User_Setup.h FILE IN THE LIBRARY ######
-  #########################################################################
+  The minimum screen size is 320 x 240 as that is the keypad size.
 */
 
-// Size of sprite image for the scrolling text, this requires ~14 Kbytes of RAM
-#define IWIDTH  240
-#define IHEIGHT 30
+// The SPIFFS (FLASH filing system) is used to hold touch screen
+// calibration data
 
-// Pause in milliseconds to set scroll speed
-#define WAIT 0
+#include "FS.h"
 
-#include <TFT_eSPI.h>                 // Include the graphics library (this includes the sprite functions)
+#include <SPI.h>
+#include <TFT_eSPI.h>      // Hardware-specific library
 
-//Produced Compiler-Warning, but thats okay ;)
-#define TFT_MISO 12
-#define TFT_MOSI 13
-#define TFT_SCLK 14
-#define TFT_CS   15  
-#define TFT_DC    2  
-#define TFT_RST   4  
-#define TOUCH_CS 33
+TFT_eSPI tft = TFT_eSPI(); // Invoke custom library
 
-TFT_eSPI    tft = TFT_eSPI();         // Create object "tft"
+// This is the file name used to store the calibration data
+// You can change this to create new calibration files.
+// The SPIFFS file name must start with "/".
+#define CALIBRATION_FILE "/TouchCalData1"
 
-TFT_eSprite img = TFT_eSprite(&tft);  // Create Sprite object "img" with pointer to "tft" object
-//                                    // the pointer is used by pushSprite() to push it onto the TFT
+// Set REPEAT_CAL to true instead of false to run calibration
+// again, otherwise it will only be done once.
+// Repeat calibration if you change the screen rotation.
+#define REPEAT_CAL false
 
-// -------------------------------------------------------------------------
-// Setup
-// -------------------------------------------------------------------------
+// Using two fonts since numbers are nice when bold
+#define LABEL1_FONT &FreeSansOblique12pt7b // Key label font 1
+#define LABEL2_FONT &FreeSansBold12pt7b    // Key label font 2
 
-void build_banner(String msg, int xpos);
-void numberBox(int num, int x, int y);
-unsigned int rainbow(byte value);
+// We have a status line for messages
+#define STATUS_X 120 // Centred on this
+#define STATUS_Y 65
 
-void setup(void) {
+// Create NavKeys
+#define KEY_W 65 // Width and height
+#define KEY_H 40
+#define KEY_SPACING_X 2 // X and Y gap
+#define KEY_TEXTSIZE 1   // Font size multiplier
+
+#define KEY_X 135 // Centre of first key
+#define KEY_Y 220
+
+char keyLabel[4][3] = {"-", "OK", "+"};
+uint16_t keyColor = TFT_BLUE;
+// Invoke the TFT_eSPI button class and create all the button objects
+TFT_eSPI_Button key[4];
+
+
+// Menüpoints
+#define MENUE_W 100 // Width and height
+#define MENUE_H 40
+#define MENUE_SPACING_Y 2 // X and Y gap
+#define MENUE_TEXTSIZE 1   // Font size multiplier
+
+#define MENUE_X 50 // Centre of first key
+#define MENUE_Y 20
+char menueLabel[5][12] = {"Vmax", "Upper Limit", "Lower Limit", "Graph", "Speichern"};
+uint16_t keyColor_Menue= TFT_RED;
+// Invoke the TFT_eSPI button class and create all the button objects
+TFT_eSPI_Button menue_keys[5];
+
+
+void drawKeypad();
+void drawMenue();
+void touch_calibrate();
+void status(const char *msg);
+
+
+//------------------------------------------------------------------------------------------
+
+void setup() {
+  // Use serial port
+  Serial.begin(9600);
+
+  // Initialise the TFT screen
   tft.init();
-  tft.setRotation(0);
 
-  tft.fillScreen(TFT_BLUE);
+  // Set the rotation before we calibrate
+  tft.setRotation(1);
+
+  // Calibrate the touch screen and retrieve the scaling factors
+  touch_calibrate();
+
+  // Clear the screen
+  tft.fillScreen(TFT_BLACK);
+
+  // Draw keypad background
+  tft.fillRect(0, 0, 320, 240, TFT_DARKGREY);
+
+  // Draw number display area and frame
+
+  // Draw keypad
+  drawKeypad();
+  drawMenue();
 }
 
-// -------------------------------------------------------------------------
-// Main loop
-// -------------------------------------------------------------------------
-void loop() {
+//------------------------------------------------------------------------------------------
 
-  while (1)
-  {
-    // Create the sprite and clear background to black
-    img.createSprite(IWIDTH, IHEIGHT);
-    //img.fillSprite(TFT_BLACK); // Optional here as we fill the sprite later anyway
+void loop(void) {
+  /*
+  uint16_t t_x = 0, t_y = 0; // To store the touch coordinates
 
-    for (int pos = IWIDTH; pos > 0; pos--)
+  // Pressed will be set true is there is a valid touch on the screen
+  boolean pressed = tft.getTouch(&t_x, &t_y);
+
+  // / Check if any key coordinate boxes contain the touch coordinates
+  for (uint8_t b = 0; b < 15; b++) {
+    if (pressed && key[b].contains(t_x, t_y)) {
+      key[b].press(true);  // tell the button it is pressed
+    } else {
+      key[b].press(false);  // tell the button it is NOT pressed
+    }
+  }
+
+  // Check if any key has changed state
+  for (uint8_t b = 0; b < 15; b++) {
+
+    if (b < 3) tft.setFreeFont(LABEL1_FONT);
+    else tft.setFreeFont(LABEL2_FONT);
+
+    if (key[b].justReleased()) key[b].drawButton();     // draw normal
+
+    if (key[b].justPressed()) {
+      key[b].drawButton(true);  // draw invert
+
+      // if a numberpad button, append the relevant # to the numberBuffer
+      if (b >= 3) {
+        if (numberIndex < NUM_LEN) {
+          numberBuffer[numberIndex] = keyLabel[b][0];
+          numberIndex++;
+          numberBuffer[numberIndex] = 0; // zero terminate
+        }
+        status(""); // Clear the old status
+      }
+
+      // Del button, so delete last char
+      if (b == 1) {
+        numberBuffer[numberIndex] = 0;
+        if (numberIndex > 0) {
+          numberIndex--;
+          numberBuffer[numberIndex] = 0;//' ';
+        }
+        status(""); // Clear the old status
+      }
+
+      if (b == 2) {
+        status("Sent value to serial port");
+        Serial.println(numberBuffer);
+      }
+      // we dont really check that the text field makes sense
+      // just try to call
+      if (b == 0) {
+        status("Value cleared");
+        numberIndex = 0; // Reset index to 0
+        numberBuffer[numberIndex] = 0; // Place null in buffer
+      }
+
+      // Update the number display field
+      tft.setTextDatum(TL_DATUM);        // Use top left corner as text coord datum
+      tft.setFreeFont(&FreeSans18pt7b);  // Choose a nicefont that fits box
+      tft.setTextColor(DISP_TCOLOR);     // Set the font colour
+
+      // Draw the string, the value returned is the width in pixels
+      int xwidth = tft.drawString(numberBuffer, DISP_X + 4, DISP_Y + 12);
+
+      // Now cover up the rest of the line up by drawing a black rectangle.  No flicker this way
+      // but it will not work with italic or oblique fonts due to character overlap.
+      tft.fillRect(DISP_X + 4 + xwidth, DISP_Y + 1, DISP_W - xwidth - 5, DISP_H - 2, TFT_BLACK);
+
+      delay(10); // UI debouncing
+    }
+  }
+  */
+}
+
+//------------------------------------------------------------------------------------------
+
+void drawKeypad()
+{
+  
+    for (uint8_t col = 0; col < 3; col++) {
+
+       key[col].initButton(&tft, KEY_X + col * (KEY_W + KEY_SPACING_X),
+                        KEY_Y, // x, y, w, h, outline, fill, text
+                        KEY_W, KEY_H, TFT_WHITE, keyColor, TFT_WHITE,
+                        keyLabel[col], KEY_TEXTSIZE);
+      key[col].drawButton();
+    }
+   
+}
+
+//------------------------------------------------------------------------------------------
+
+void drawMenue()
+{
+  
+    for (uint8_t row = 0; row < 5; row++) {
+
+       menue_keys[row].initButton(&tft, MENUE_X,
+                        MENUE_Y + row * (MENUE_H + MENUE_SPACING_Y), // x, y, w, h, outline, fill, text
+                        MENUE_W, KEY_H, TFT_WHITE, keyColor_Menue, TFT_WHITE,
+                        menueLabel[row], KEY_TEXTSIZE);
+      menue_keys[row].drawButton();
+    }
+   
+}
+//------------------------------------------------------------------------------------------
+
+void touch_calibrate()
+{
+  uint16_t calData[5];
+  uint8_t calDataOK = 0;
+
+  // check file system exists
+  if (!SPIFFS.begin()) {
+    Serial.println("Formating file system");
+    SPIFFS.format();
+    SPIFFS.begin();
+  }
+
+  // check if calibration file exists and size is correct
+  if (SPIFFS.exists(CALIBRATION_FILE)) {
+    if (REPEAT_CAL)
     {
-      build_banner("Hello World", pos);
-      img.pushSprite(0, 0);
+      // Delete if we want to re-calibrate
+      SPIFFS.remove(CALIBRATION_FILE);
+    }
+    else
+    {
+      File f = SPIFFS.open(CALIBRATION_FILE, "r");
+      if (f) {
+        if (f.readBytes((char *)calData, 14) == 14)
+          calDataOK = 1;
+        f.close();
+      }
+    }
+  }
 
-      build_banner("TFT_eSPI sprite" , pos);
-      img.pushSprite(0, 50);
+  if (calDataOK && !REPEAT_CAL) {
+    // calibration data valid
+    tft.setTouch(calData);
+  } else {
+    // data not valid so recalibrate
+    tft.fillScreen(TFT_BLACK);
+    tft.setCursor(20, 0);
+    tft.setTextFont(2);
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
 
-      delay(WAIT);
+    tft.println("Touch corners as indicated");
+
+    tft.setTextFont(1);
+    tft.println();
+
+    if (REPEAT_CAL) {
+      tft.setTextColor(TFT_RED, TFT_BLACK);
+      tft.println("Set REPEAT_CAL to false to stop this running again!");
     }
 
-    // Delete sprite to free up the memory
-    img.deleteSprite();
+    tft.calibrateTouch(calData, TFT_MAGENTA, TFT_BLACK, 15);
 
-    // Create a sprite of a different size
-    numberBox(random(100), 60, 100);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.println("Calibration complete!");
 
+    // store data
+    File f = SPIFFS.open(CALIBRATION_FILE, "w");
+    if (f) {
+      f.write((const unsigned char *)calData, 14);
+      f.close();
+    }
   }
 }
 
-// #########################################################################
-// Build the scrolling sprite image from scratch, draw text at x = xpos
-// #########################################################################
+//------------------------------------------------------------------------------------------
 
-void build_banner(String msg, int xpos)
-{
-  int h = IHEIGHT;
-
-  // We could just use fillSprite(color) but lets be a bit more creative...
-
-  // Fill with rainbow stripes
-  while (h--) img.drawFastHLine(0, h, IWIDTH, rainbow(h * 4));
-
-  // Draw some graphics, the text will apear to scroll over these
-  img.fillRect  (IWIDTH / 2 - 20, IHEIGHT / 2 - 10, 40, 20, TFT_YELLOW);
-  img.fillCircle(IWIDTH / 2, IHEIGHT / 2, 10, TFT_ORANGE);
-
-  // Now print text on top of the graphics
-  img.setTextSize(1);           // Font size scaling is x1
-  img.setTextFont(4);           // Font 4 selected
-  img.setTextColor(TFT_BLACK);  // Black text, no background colour
-  img.setTextWrap(false);       // Turn of wrap so we can print past end of sprite
-
-  // Need to print twice so text appears to wrap around at left and right edges
-  img.setCursor(xpos, 2);  // Print text at xpos
-  img.print(msg);
-
-  img.setCursor(xpos - IWIDTH, 2); // Print text at xpos - sprite width
-  img.print(msg);
+// Print something in the mini status bar
+void status(const char *msg) {
+  tft.setTextPadding(240);
+  //tft.setCursor(STATUS_X, STATUS_Y);
+  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
+  tft.setTextFont(0);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextSize(1);
+  tft.drawString(msg, STATUS_X, STATUS_Y);
 }
 
-// #########################################################################
-// Create sprite, plot graphics in it, plot to screen, then delete sprite
-// #########################################################################
-void numberBox(int num, int x, int y)
-{
-  // Create a sprite 80 pixels wide, 50 high (8kbytes of RAM needed)
-  img.createSprite(80, 50);
+//------------------------------------------------------------------------------------------
 
-  // Fill it with black
-  img.fillSprite(TFT_BLACK);
-
-  // Draw a backgorund of 2 filled triangles
-  img.fillTriangle(  0, 0,  0, 49, 40, 25, TFT_RED);
-  img.fillTriangle( 79, 0, 79, 49, 40, 25, TFT_DARKGREEN);
-
-  // Set the font parameters
-  img.setTextSize(1);           // Font size scaling is x1
-  img.setFreeFont(&FreeSerifBoldItalic24pt7b);  // Select free font
-  img.setTextColor(TFT_WHITE);  // White text, no background colour
-
-  // Set text coordinate datum to middle centre
-  img.setTextDatum(MC_DATUM);
-
-  // Draw the number in middle of 80 x 50 sprite
-  img.drawNumber(num, 40, 25);
-
-  // Push sprite to TFT screen CGRAM at coordinate x,y (top left corner)
-  img.pushSprite(x, y);
-
-  // Delete sprite to free up the RAM
-  img.deleteSprite();
-}
-
-
-// #########################################################################
-// Return a 16 bit rainbow colour
-// #########################################################################
-unsigned int rainbow(byte value)
-{
-  // Value is expected to be in range 0-127
-  // The value is converted to a spectrum colour from 0 = red through to 127 = blue
-
-  byte red   = 0; // Red is the top 5 bits of a 16 bit colour value
-  byte green = 0;// Green is the middle 6 bits
-  byte blue  = 0; // Blue is the bottom 5 bits
-
-  byte sector = value >> 5;
-  byte amplit = value & 0x1F;
-
-  switch (sector)
-  {
-    case 0:
-      red   = 0x1F;
-      green = amplit;
-      blue  = 0;
-      break;
-    case 1:
-      red   = 0x1F - amplit;
-      green = 0x1F;
-      blue  = 0;
-      break;
-    case 2:
-      red   = 0;
-      green = 0x1F;
-      blue  = amplit;
-      break;
-    case 3:
-      red   = 0;
-      green = 0x1F - amplit;
-      blue  = 0x1F;
-      break;
-  }
-
-  return red << 11 | green << 6 | blue;
-}
